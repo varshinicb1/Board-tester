@@ -1,3 +1,5 @@
+# Proprietary Software - Do not distribute or copy without permission from Varshini CB. All rights reserved. © 2025 Varshini CB
+
 import sys
 import os
 import subprocess
@@ -6,27 +8,19 @@ import json
 import serial
 import serial.tools.list_ports
 import csv
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QProgressBar, QGraphicsDropShadowEffect, QFileDialog, QToolTip, QMessageBox, QInputDialog
-from PyQt5.QtCore import QTimer, Qt, QPropertyAnimation, QEasingCurve, QSettings
-from PyQt5.QtGui import QColor, QFont, QPixmap, QMovie, QIcon
-try:
-    from pyqtgraph import PlotWidget, mkPen
-except ImportError:
-    QMessageBox.critical(None, "Missing Package", "Please run: pip install pyqtgraph")
-    sys.exit(1)
+import dearpygui.dearpygui as dpg
 
 # Configuration
 SKETCH_DIR = os.path.expanduser("~/edgehax_test") if sys.platform != 'win32' else os.path.join(os.environ['USERPROFILE'], 'edgehax_test')
 BOARD_FQBN = "esp32:esp32:esp32-wroom-da"
 ARDUINO_CLI = "arduino-cli"
-POLL_INTERVAL = 1000
+POLL_INTERVAL = 1.0  # Seconds
 VID_PID = (0x1A86, 0x7523)
 BAUD_RATE = 115200
 TIMEOUT = 60
 LOGO_PATH = os.path.expanduser("~/Downloads/Edgehax-no-bg.png") if sys.platform != 'win32' else os.path.join(os.environ['USERPROFILE'], 'Downloads', 'Edgehax-no-bg.png')
 CONFETTI_GIF = os.path.expanduser("~/Downloads/confetti.gif") if sys.platform != 'win32' else os.path.join(os.environ['USERPROFILE'], 'Downloads', 'confetti.gif')
-CONFIG_ORG = "VarshiniCB"
-CONFIG_APP = "EdgehaxTester"
+CONFIG_FILE = os.path.expanduser("~/edgehax_tester/config.json")
 
 TESTS = [
     "test_led",
@@ -43,26 +37,101 @@ TESTS = [
     "test_peripherals"
 ]
 
-class EdgehaxTester(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Edgehax Board Tester v1.0 - Created by Varshini CB")
-        self.setGeometry(100, 100, 1000, 800)
-        
-        self.settings = QSettings(CONFIG_ORG, CONFIG_APP)
-        self.dark_theme = self.settings.value('dark_theme', True, type=bool)
-        self.wifi_ssid = self.settings.value('wifi_ssid', "YOUR_WIFI_SSID")
-        self.wifi_password = self.settings.value('wifi_password', "YOUR_WIFI_PASSWORD")
-        self.sms_target = self.settings.value('sms_target', "9380763393")
-        self.apply_theme()
-        
-        try:
-            subprocess.run([ARDUINO_CLI, "version"], capture_output=True, check=True)
-        except:
-            QMessageBox.critical(self, "Setup Error", "Install arduino-cli:\\nUbuntu: curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh\\nWindows: Download from https://arduino.github.io/arduino-cli/installation/\\nThen run: arduino-cli core install esp32:esp32")
-        
-        # Guidelines
-        guidelines = """
+# Initialize Dear PyGui context
+try:
+    dpg.create_context()
+except Exception as e:
+    print("Failed to create Dear PyGui context: " + str(e))
+    sys.exit(1)
+
+# Global variables
+ser = None
+board_port = None
+test_results = []
+known_ports = set()
+try:
+    known_ports = set([port.device for port in serial.tools.list_ports.comports()])
+except Exception as e:
+    print("Failed to initialize serial ports: " + str(e))
+dark_theme = True
+wifi_ssid = "YOUR_WIFI_SSID"
+wifi_password = "YOUR_WIFI_PASSWORD"
+sms_target = "9380763393"
+progress = 0
+voltage_x = []
+voltage_y = []
+
+# Load config
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+            wifi_ssid = config.get('wifi_ssid', "YOUR_WIFI_SSID")
+            wifi_password = config.get('wifi_password', "YOUR_WIFI_PASSWORD")
+            sms_target = config.get('sms_target', "9380763393")
+            dark_theme = config.get('dark_theme', True)
+    except Exception as e:
+        print("Failed to load config: " + str(e))
+
+# Save config
+def save_config():
+    global wifi_ssid, wifi_password, sms_target, dark_theme
+    config = {
+        'wifi_ssid': wifi_ssid,
+        'wifi_password': wifi_password,
+        'sms_target': sms_target,
+        'dark_theme': dark_theme
+    }
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f)
+    except Exception as e:
+        print("Failed to save config: " + str(e))
+
+# Theme functions
+def set_dark_theme():
+    try:
+        with dpg.theme() as global_theme:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (18, 18, 18, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (0, 255, 255, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (30, 30, 30, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (0, 255, 255, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (0, 200, 200, 255))
+                # Use generic color for progress and plot to avoid version issues
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (0, 255, 255, 255))  # For progress bar
+                dpg.add_theme_color(dpg.mvThemeCol_PlotLines, (0, 255, 255, 255))  # For plot
+        dpg.bind_theme(global_theme)
+    except Exception as e:
+        print("Failed to apply dark theme: " + str(e))
+        dpg.bind_theme(None)  # Fallback to default
+
+def set_light_theme():
+    try:
+        with dpg.theme() as global_theme:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (240, 240, 240, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (0, 0, 0, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (220, 220, 220, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (0, 0, 0, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (50, 50, 50, 255))
+                # Use generic color for progress and plot to avoid version issues
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (0, 0, 0, 255))  # For progress bar
+                dpg.add_theme_color(dpg.mvThemeCol_PlotLines, (0, 0, 0, 255))  # For plot
+        dpg.bind_theme(global_theme)
+    except Exception as e:
+        print("Failed to apply light theme: " + str(e))
+        dpg.bind_theme(None)  # Fallback to default
+
+# Apply theme
+if dark_theme:
+    set_dark_theme()
+else:
+    set_light_theme()
+
+# Guidelines modal
+with dpg.window(label="Hardware Setup Guidelines", modal=True, show=False, tag="guidelines_modal", width=600, height=400):
+    dpg.add_text("""
 1. Insert 4G SIM (data/SMS plan) in drawer slot.
 2. Insert SD card (up to 128GB) for logging.
 3. Attach antennas (SMA for 4G/GNSS).
@@ -71,410 +140,276 @@ class EdgehaxTester(QMainWindow):
 6. For UART loopback: Jumper TX2 (GPIO17) to RX2 (GPIO16).
 7. For power: Use multimeter in series with 9V supply during tests (77mA working, 165mA peak expected).
 8. Plug USB Type-C. Tests start automatically.
-        """
-        QMessageBox.information(self, "Hardware Setup Guidelines", guidelines)
-        
-        # Logo
-        logo_label = QLabel()
-        pixmap = QPixmap(LOGO_PATH)
-        if not pixmap.isNull():
-            pixmap = pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            logo_label.setPixmap(pixmap)
+    """)
+    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("guidelines_modal", show=False))
+
+# Error modals
+with dpg.window(label="Detection Error", modal=True, show=False, tag="detection_error_modal", width=400, height=200):
+    dpg.add_text("", tag="detection_error_text")
+    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("detection_error_modal", show=False))
+
+with dpg.window(label="Upload Error", modal=True, show=False, tag="upload_error_modal", width=400, height=200):
+    dpg.add_text("", tag="upload_error_text")
+    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("upload_error_modal", show=False))
+
+with dpg.window(label="Connection Error", modal=True, show=False, tag="connection_error_modal", width=400, height=200):
+    dpg.add_text("", tag="connection_error_text")
+    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("connection_error_modal", show=False))
+
+with dpg.window(label="Test Error", modal=True, show=False, tag="test_error_modal", width=400, height=200):
+    dpg.add_text("", tag="test_error_text")
+    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("test_error_modal", show=False))
+
+with dpg.window(label="Settings Error", modal=True, show=False, tag="settings_error_modal", width=400, height=200):
+    dpg.add_text("", tag="settings_error_text")
+    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("settings_error_modal", show=False))
+
+# Main window
+with dpg.window(tag="main_window", label="Edgehax Board Tester v1.0 - Created by Varshini CB", width=1000, height=800):
+    # Logo
+    try:
+        dpg.add_image(LOGO_PATH, width=150, height=150, tag="logo_image")
+    except Exception as e:
+        dpg.add_text("Logo Not Found: " + str(e), tag="logo_image")
+
+    # Branding
+    dpg.add_text("Edgehax Board Tester", tag="branding_label")
+
+    # Status
+    dpg.add_text("Status: Waiting for Board Connection...", tag="status_label")
+
+    # Progress
+    dpg.add_progress_bar(tag="progress_bar", default_value=0.0, width=-1, overlay="0 / " + str(len(TESTS)) + " Tests Completed")
+
+    # Table
+    with dpg.table(header_row=True, borders_innerH=True, borders_outerH=True, borders_innerV=True, borders_outerV=True, tag="test_table"):
+        dpg.add_table_column(label="Test")
+        dpg.add_table_column(label="Status")
+        dpg.add_table_column(label="Details")
+        for test in TESTS:
+            with dpg.table_row():
+                dpg.add_text(test.replace("test_", "").upper().replace("_", " "), tag=test + "_test")
+                dpg.add_text("Pending", tag=test + "_status")
+                dpg.add_text("", tag=test + "_details")
+
+    # Voltage plot
+    with dpg.plot(label="Real-Time Voltage Monitor", height=300, width=-1, tag="voltage_plot", show=False):
+        dpg.add_plot_legend()
+        dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="voltage_x_axis")
+        with dpg.plot_axis(dpg.mvYAxis, label="Voltage (V)", tag="voltage_y_axis"):
+            dpg.add_line_series(voltage_x, voltage_y, label="Voltage", tag="voltage_series")
+
+    # Confetti
+    try:
+        dpg.add_image(CONFETTI_GIF, tag="confetti", show=False)
+    except Exception as e:
+        dpg.add_text("Confetti Not Found: " + str(e), tag="confetti", show=False)
+
+    # Buttons
+    dpg.add_button(label="Export Logs to CSV", callback=lambda: export_logs(None, None))
+    dpg.add_button(label="Settings", callback=lambda: open_settings(None, None))
+    dpg.add_button(label="Toggle Theme", callback=lambda: toggle_theme(None, None))
+    dpg.add_button(label="Show Guidelines", callback=lambda: dpg.configure_item("guidelines_modal", show=True))
+
+    # Footer
+    dpg.add_text("Created by Varshini CB", tag="footer_label")
+
+# Settings modal
+with dpg.window(label="Settings", modal=True, show=False, tag="settings_modal", width=400, height=300):
+    dpg.add_input_text(label="WiFi SSID", default_value=wifi_ssid, tag="wifi_ssid_input")
+    dpg.add_input_text(label="WiFi Password", default_value=wifi_password, tag="wifi_password_input")
+    dpg.add_input_text(label="SMS Target", default_value=sms_target, tag="sms_target_input")
+    dpg.add_button(label="Save", callback=lambda: save_settings(None, None))
+    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("settings_modal", show=False))
+
+def detect_board(sender, app_data):
+    global known_ports, ser, board_port, test_results, progress, voltage_x, voltage_y
+    try:
+        current_ports = {port.device for port in serial.tools.list_ports.comports()}
+        new_ports = current_ports - known_ports
+        if new_ports:
+            for port in serial.tools.list_ports.comports():
+                if port.device in new_ports and (port.vid, port.pid) == VID_PID:
+                    board_port = port.device
+                    dpg.set_value("status_label", "Board detected on " + board_port + ". Uploading sketch...")
+                    upload_sketch()
+                    break
+        known_ports = current_ports
+    except Exception as e:
+        dpg.set_value("status_label", "Detection error: " + str(e))
+        dpg.set_value("detection_error_text", "Detection error: " + str(e) + "\\nReplug board or check drivers: https://wch-ic.com/downloads/CH341SER_ZIP.html")
+        dpg.configure_item("detection_error_modal", show=True)
+
+def upload_sketch():
+    global ser, board_port
+    try:
+        subprocess.run([ARDUINO_CLI, "compile", "--fqbn", BOARD_FQBN, SKETCH_DIR], check=True, capture_output=True, text=True)
+        subprocess.run([ARDUINO_CLI, "upload", "-p", board_port, "--fqbn", BOARD_FQBN, SKETCH_DIR], check=True, capture_output=True, text=True)
+        time.sleep(2)
+        connect_serial()
+    except Exception as e:
+        dpg.set_value("status_label", "Upload failed: " + str(e))
+        dpg.set_value("upload_error_text", "Failed to upload sketch: " + str(e) + "\\nCheck arduino-cli, board power/USB, or drivers: https://arduino.github.io/arduino-cli/installation/")
+        dpg.configure_item("upload_error_modal", show=True)
+
+def connect_serial():
+    global ser, board_port, test_results, progress
+    try:
+        ser = serial.Serial(board_port, BAUD_RATE, timeout=1)
+        time.sleep(2)
+        line = ser.readline().decode('utf-8').strip()
+        if "ready" in line:
+            dpg.set_value("status_label", "Connected to " + board_port + ". Starting automatic tests...")
+            start_tests()
         else:
-            logo_label.setText("Logo Not Found")
-        logo_label.setAlignment(Qt.AlignCenter)
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 255, 255, 128) if self.dark_theme else QColor(0, 0, 0, 128))
-        shadow.setOffset(0, 0)
-        logo_label.setGraphicsEffect(shadow)
-        
-        # Branding
-        branding_label = QLabel("Edgehax Board Tester")
-        branding_label.setFont(QFont("Arial", 20, QFont.Bold))
-        branding_label.setAlignment(Qt.AlignCenter)
-        
-        # Status
-        self.status_label = QLabel("Status: Waiting for Board Connection...")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setToolTip("Plug in the Edgehax board to start automatic testing.")
-        
-        # Progress
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(len(TESTS))
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("%v / %m Tests Completed")
-        self.progress_bar.setToolTip("Test progress - Automatic, no action needed.")
-        
-        # Table
-        self.table = QTableWidget()
-        self.table.setRowCount(len(TESTS))
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Test", "Status", "Details"])
-        self.table.setAlternatingRowColors(True)
-        for row, test in enumerate(TESTS):
-            item_test = QTableWidgetItem(test.replace("test_", "").upper().replace("_", " "))
-            item_test.setToolTip("Automatic test for " + test.replace("test_", "").upper())
-            self.table.setItem(row, 0, item_test)
-            self.table.setItem(row, 1, QTableWidgetItem("Pending"))
-            self.table.setItem(row, 2, QTableWidgetItem(""))
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setToolTip("Results - Green: Pass, Red: Fail. Logs to SD card.")
-        
-        # Voltage graph
-        try:
-            self.voltage_graph = PlotWidget()
-            self.voltage_graph.setTitle("Real-Time Voltage Monitor")
-            self.voltage_graph.setLabel('left', 'Voltage (V)')
-            self.voltage_graph.setLabel('bottom', 'Time (s)')
-            self.voltage_graph.hide()
-            self.voltage_data = []
-            self.voltage_plot = self.voltage_graph.plot(pen=mkPen('c', width=2))
-        except Exception as e:
-            self.status_label.setText("Voltage graph init failed: " + str(e))
-            self.voltage_graph = None
-        
-        # Confetti
-        self.confetti_label = QLabel()
-        try:
-            self.confetti_movie = QMovie(CONFETTI_GIF)
-            self.confetti_label.setMovie(self.confetti_movie)
-            self.confetti_label.hide()
-        except Exception as e:
-            self.status_label.setText("Confetti animation init failed: " + str(e))
-        
-        # Export
-        export_btn = QPushButton("Export Logs to CSV")
-        export_btn.clicked.connect(self.export_logs)
-        export_btn.setToolTip("Save results to CSV on your computer.")
-        
-        # Settings
-        settings_btn = QPushButton("Settings")
-        settings_btn.clicked.connect(self.open_settings)
-        settings_btn.setToolTip("Change WiFi, SMS, theme, etc.")
-        
-        # Theme toggle
-        theme_btn = QPushButton("Switch to Light Theme" if self.dark_theme else "Switch to Dark Theme")
-        theme_btn.clicked.connect(self.toggle_theme)
-        
-        # Footer
-        footer_label = QLabel("Created by Varshini CB")
-        footer_label.setFont(QFont("Arial", 10))
-        footer_label.setAlignment(Qt.AlignCenter)
-        
-        # Layout
-        layout = QVBoxLayout()
-        layout.addWidget(logo_label)
-        layout.addWidget(branding_label)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.table)
-        if self.voltage_graph:
-            layout.addWidget(self.voltage_graph)
-        layout.addWidget(self.confetti_label)
-        layout.addWidget(export_btn)
-        layout.addWidget(settings_btn)
-        layout.addWidget(theme_btn)
-        layout.addWidget(footer_label)
-        
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
-        
-        # Detection
-        self.known_ports = set(self.get_current_ports())
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.detect_board)
-        self.timer.start(POLL_INTERVAL)
-        
-        self.ser = None
-        self.board_port = None
-        self.test_results = []
+            raise Exception("No ready signal")
+    except Exception as e:
+        dpg.set_value("status_label", "Connection failed: " + str(e))
+        dpg.set_value("connection_error_text", "Failed to connect: " + str(e) + "\\nReplug board or check drivers: https://wch-ic.com/downloads/CH341SER_ZIP.html")
+        dpg.configure_item("connection_error_modal", show=True)
 
-    def apply_theme(self):
-        if self.dark_theme:
-            self.setStyleSheet("""
-                QMainWindow {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #121212, stop:1 #1E1E1E);
-                    color: #00FFFF;
-                }
-                QLabel {
-                    color: #00FFFF;
-                }
-                QPushButton {
-                    background-color: #1E1E1E;
-                    color: #00FFFF;
-                    border: 2px solid #00FFFF;
-                }
-                QPushButton:hover {
-                    background-color: #00FFFF;
-                    color: #121212;
-                }
-                QTableWidget {
-                    background-color: #1E1E1E;
-                    color: #FFFFFF;
-                    gridline-color: #00FFFF;
-                    alternate-background-color: #2A2A2A;
-                }
-                QProgressBar {
-                    background-color: #1E1E1E;
-                    border: 2px solid #00FFFF;
-                    color: #00FFFF;
-                }
-                QProgressBar::chunk {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00FFFF, stop:1 #008080);
-                }
-            """)
-            if self.voltage_graph:
-                self.voltage_graph.setBackground('#1E1E1E')
-                self.voltage_graph.getAxis('left').setTextPen('#00FFFF')
-                self.voltage_graph.getAxis('bottom').setTextPen('#00FFFF')
-                self.voltage_graph.setTitle("Real-Time Voltage Monitor", color="#00FFFF")
-        else:
-            self.setStyleSheet("""
-                QMainWindow {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFFFFF, stop:1 #F0F0F0);
-                    color: #000000;
-                }
-                QLabel {
-                    color: #000000;
-                }
-                QPushButton {
-                    background-color: #F0F0F0;
-                    color: #000000;
-                    border: 2px solid #000000;
-                }
-                QPushButton:hover {
-                    background-color: #000000;
-                    color: #FFFFFF;
-                }
-                QTableWidget {
-                    background-color: #FFFFFF;
-                    color: #000000;
-                    gridline-color: #CCCCCC;
-                    alternate-background-color: #F0F0F0;
-                }
-                QProgressBar {
-                    background-color: #F0F0F0;
-                    border: 2px solid #000000;
-                    color: #000000;
-                }
-                QProgressBar::chunk {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #CCCCCC, stop:1 #AAAAAA);
-                }
-            """)
-            if self.voltage_graph:
-                self.voltage_graph.setBackground('#FFFFFF')
-                self.voltage_graph.getAxis('left').setTextPen('#000000')
-                self.voltage_graph.getAxis('bottom').setTextPen('#000000')
-                self.voltage_graph.setTitle("Real-Time Voltage Monitor", color="#000000")
+def start_tests():
+    global ser, test_results, progress, voltage_x, voltage_y
+    try:
+        test_results = []
+        progress = 0
+        dpg.set_value("progress_bar", 0.0)
+        dpg.configure_item("progress_bar", overlay="0 / " + str(len(TESTS)) + " Tests Completed")
+        for test in TESTS:
+            dpg.set_value(test + "_status", "Running...")
+            result = run_single_test(test)
+            status = "Pass" if result.get("success", False) else "Fail"
+            details = result.get("details", "")
+            if "wifi" in test and not result.get("success", False):
+                details += " (Invalid credentials - Update in Settings)"
+            elif "sim" in test and not result.get("success", False):
+                details += " (Check SIM insertion/network)"
+            elif "sd" in test and not result.get("success", False):
+                details += " (Check SD card insertion)"
+            dpg.set_value(test + "_status", status)
+            dpg.set_value(test + "_details", details)
+            test_results.append({"Test": test.replace("test_", "").upper().replace("_", " "), "Status": status, "Details": details})
+            progress += 1
+            dpg.set_value("progress_bar", progress / len(TESTS))
+            dpg.configure_item("progress_bar", overlay=str(progress) + " / " + str(len(TESTS)) + " Tests Completed")
+            if test == "test_voltage":
+                update_voltage_plot()
+        dpg.set_value("status_label", "Testing Complete. Results logged to SD card. Unplug and replug for next board.")
+        if all(r['Status'] == "Pass" for r in test_results):
+            dpg.configure_item("confetti", show=True)
+            time.sleep(5)
+            dpg.configure_item("confetti", show=False)
+    except Exception as e:
+        dpg.set_value("status_label", "Test error: " + str(e))
+        dpg.set_value("test_error_text", "Testing interrupted: " + str(e) + "\\nReplug and try again.")
+        dpg.configure_item("test_error_modal", show=True)
 
-    def toggle_theme(self):
-        self.dark_theme = not self.dark_theme
-        self.apply_theme()
-        self.settings.setValue('dark_theme', self.dark_theme)
-        self.settings.sync()
-
-    def open_settings(self):
-        ssid, ok = QInputDialog.getText(self, "WiFi Settings", "Enter WiFi SSID:", text=self.wifi_ssid)
-        if ok:
-            self.wifi_ssid = ssid
-            password, ok = QInputDialog.getText(self, "WiFi Settings", "Enter WiFi Password:", text=self.wifi_password)
-            if ok:
-                self.wifi_password = password
-                if self.ser:
-                    try:
-                        self.ser.write(("set_wifi:" + ssid + ":" + password + "\\n").encode())
-                        line = self.ser.readline().decode('utf-8').strip()
-                        if "wifi_updated" in line:
-                            QMessageBox.information(self, "Success", "WiFi updated on board.")
-                        else:
-                            raise Exception("Update failed")
-                    except Exception as e:
-                        QMessageBox.warning(self, "Error", "Failed to update WiFi on board: " + str(e) + "\\nCheck board connection.")
-        sms, ok = QInputDialog.getText(self, "SMS Settings", "Enter SMS Target Phone:", text=self.sms_target)
-        if ok:
-            self.sms_target = sms
-            if self.ser:
+def run_single_test(test_name):
+    global ser, voltage_x, voltage_y
+    try:
+        ser.write((test_name + "\n").encode())
+        start_time = time.time()
+        voltage_y = []
+        voltage_x = []
+        while time.time() - start_time < TIMEOUT:
+            line = ser.readline().decode('utf-8').strip()
+            if line:
                 try:
-                    self.ser.write(("set_sms:" + sms + "\\n").encode())
-                    line = self.ser.readline().decode('utf-8').strip()
-                    if "sms_updated" in line:
-                        QMessageBox.information(self, "Success", "SMS target updated on board.")
-                    else:
-                        raise Exception("Update failed")
-                except Exception as e:
-                    QMessageBox.warning(self, "Error", "Failed to update SMS on board: " + str(e) + "\\nCheck board connection.")
-        self.settings.setValue('wifi_ssid', self.wifi_ssid)
-        self.settings.setValue('wifi_password', self.wifi_password)
-        self.settings.setValue('sms_target', self.sms_target)
-        self.settings.sync()
+                    data = json.loads(line)
+                    if test_name == "test_voltage":
+                        voltage_y.append(float(data.get("voltage", 0)))
+                        voltage_x.append(len(voltage_y) - 1)
+                    return data
+                except json.JSONDecodeError:
+                    continue
+        return {"success": False, "details": "Timeout - Check connections/antennas."}
+    except Exception as e:
+        return {"success": False, "details": "Error: " + str(e) + " - Replug board."}
 
-    def get_current_ports(self):
-        try:
-            return {port.device for port in serial.tools.list_ports.comports()}
-        except Exception as e:
-            QMessageBox.warning(self, "Error", "Serial ports scan failed: " + str(e) + "\\nInstall drivers or check USB.")
-            return set()
+def update_voltage_plot():
+    global voltage_x, voltage_y
+    try:
+        if voltage_x and voltage_y:
+            dpg.set_value("voltage_series", [voltage_x, voltage_y])
+            dpg.configure_item("voltage_plot", show=True)
+    except Exception as e:
+        dpg.set_value("status_label", "Voltage plot update failed: " + str(e))
 
-    def detect_board(self):
-        try:
-            current_ports = self.get_current_ports()
-            new_ports = current_ports - self.known_ports
-            if new_ports:
-                for port in serial.tools.list_ports.comports():
-                    if port.device in new_ports and (port.vid, port.pid) == VID_PID:
-                        self.board_port = port.device
-                        self.status_label.setText("Board detected on " + self.board_port + ". Uploading sketch...")
-                        self.animate_fade(self.status_label)
-                        self.upload_sketch()
-                        break
-            self.known_ports = current_ports
-        except Exception as e:
-            self.status_label.setText("Detection error: " + str(e))
+def open_settings(sender, app_data):
+    global wifi_ssid, wifi_password, sms_target
+    dpg.configure_item("settings_modal", show=True)
 
-    def upload_sketch(self):
-        try:
-            cmd = [ARDUINO_CLI, "compile", "--fqbn", BOARD_FQBN, SKETCH_DIR]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            cmd = [ARDUINO_CLI, "upload", "-p", self.board_port, "--fqbn", BOARD_FQBN, SKETCH_DIR]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            time.sleep(2)
-            self.connect_serial()
-        except Exception as e:
-            self.status_label.setText("Upload failed: " + str(e))
-            QMessageBox.critical(self, "Upload Error", "Failed to upload sketch: " + str(e) + "\\nCheck arduino-cli, board power/USB, or drivers.")
+def save_settings(sender, app_data):
+    global wifi_ssid, wifi_password, sms_target, ser
+    try:
+        wifi_ssid = dpg.get_value("wifi_ssid_input")
+        wifi_password = dpg.get_value("wifi_password_input")
+        sms_target = dpg.get_value("sms_target_input")
+        save_config()
+        dpg.configure_item("settings_modal", show=False)
+        if ser:
+            ser.write(("set_wifi:" + wifi_ssid + ":" + wifi_password + "\\n").encode())
+            line = ser.readline().decode('utf-8').strip()
+            if "wifi_updated" not in line:
+                raise Exception("WiFi update failed")
+            ser.write(("set_sms:" + sms_target + "\\n").encode())
+            line = ser.readline().decode('utf-8').strip()
+            if "sms_updated" not in line:
+                raise Exception("SMS update failed")
+            dpg.set_value("status_label", "Settings updated successfully.")
+    except Exception as e:
+        dpg.set_value("status_label", "Settings update failed: " + str(e))
+        dpg.set_value("settings_error_text", "Settings update failed: " + str(e) + "\\nCheck board connection.")
+        dpg.configure_item("settings_error_modal", show=True)
 
-    def connect_serial(self):
-        try:
-            self.ser = serial.Serial(self.board_port, BAUD_RATE, timeout=1)
-            time.sleep(2)
-            line = self.ser.readline().decode('utf-8').strip()
-            if "ready" in line:
-                self.status_label.setText("Connected to " + self.board_port + ". Starting automatic tests...")
-                self.animate_fade(self.status_label)
-                self.start_tests()
-            else:
-                raise Exception("No ready signal")
-        except Exception as e:
-            self.status_label.setText("Connection failed: " + str(e))
-            QMessageBox.warning(self, "Connection Error", "Failed to connect: " + str(e) + "\\nReplug board or check drivers.")
+def toggle_theme(sender, app_data):
+    global dark_theme
+    try:
+        dark_theme = not dark_theme
+        if dark_theme:
+            set_dark_theme()
+        else:
+            set_light_theme()
+        save_config()
+        dpg.set_value("status_label", "Theme switched successfully.")
+    except Exception as e:
+        dpg.set_value("status_label", "Theme switch failed: " + str(e))
 
-    def start_tests(self):
-        try:
-            self.status_label.setText("Testing in progress... Please wait (automatic).")
-            self.progress_bar.setValue(0)
-            self.test_results = []
-            for row, test in enumerate(TESTS):
-                self.table.item(row, 1).setText("Running...")
-                self.table.item(row, 1).setBackground(QColor(255, 255, 0))
-                QApplication.processEvents()
-                
-                result = self.run_single_test(test)
-                status = "Pass" if result.get("success", False) else "Fail"
-                details = result.get("details", "")
-                if "wifi" in test and not result.get("success", False):
-                    details += " (Invalid credentials - Update in Settings)"
-                elif "sim" in test and not result.get("success", False):
-                    details += " (Check SIM insertion/network)"
-                elif "sd" in test and not result.get("success", False):
-                    details += " (Check SD card insertion)"
-                
-                self.table.item(row, 1).setText(status)
-                self.table.item(row, 1).setBackground(QColor(0, 255, 0) if result.get("success", False) else QColor(255, 0, 0))
-                self.table.item(row, 2).setText(details)
-                self.progress_bar.setValue(row + 1)
-                self.animate_fade(self.table.item(row, 1))
-                self.test_results.append({"Test": test.replace("test_", "").upper().replace("_", " "), "Status": status, "Details": details})
-                QApplication.processEvents()
-            
-            self.status_label.setText("Testing Complete. Results logged to SD card. Unplug and replug for next board.")
-            self.animate_fade(self.status_label)
-            if all(r['Status'] == "Pass" for r in self.test_results):
-                self.confetti_label.show()
-                self.confetti_movie.start()
-                time.sleep(5)
-                self.confetti_movie.stop()
-                self.confetti_label.hide()
-        except Exception as e:
-            self.status_label.setText("Test error: " + str(e))
-            QMessageBox.warning(self, "Test Error", "Testing interrupted: " + str(e) + "\\nReplug and try again.")
+def export_logs(sender, app_data):
+    global test_results
+    try:
+        with dpg.file_dialog(directory_selector=False, default_extension=".csv", callback=export_logs_callback, modal=True):
+            dpg.add_file_extension(".csv")
+    except Exception as e:
+        dpg.set_value("status_label", "Failed to open file dialog: " + str(e))
 
-    def run_single_test(self, test_name):
-        try:
-            self.ser.write((test_name + "\n").encode())
-            start_time = time.time()
-            while time.time() - start_time < TIMEOUT:
-                line = self.ser.readline().decode('utf-8').strip()
-                if line:
-                    try:
-                        return json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-            return {"success": False, "details": "Timeout - Check connections/antennas."}
-        except Exception as e:
-            return {"success": False, "details": "Error: " + str(e) + " - Replug board."}
-        finally:
-            if test_name == "test_voltage" and self.voltage_graph:
-                self.voltage_graph.show()
-                self.voltage_data = []
-                for _ in range(20):
-                    try:
-                        self.ser.write((test_name + "\n").encode())
-                        line = self.ser.readline().decode('utf-8').strip()
-                        if line:
-                            data = json.loads(line)
-                            v = data.get("voltage", 0)
-                            self.voltage_data.append(v)
-                            self.voltage_plot.setData(self.voltage_data)
-                            QApplication.processEvents()
-                    except:
-                        pass
-                    time.sleep(0.5)
-                self.voltage_graph.hide()
-                if self.voltage_data:
-                    avg_v = sum(self.voltage_data) / len(self.voltage_data)
-                else:
-                    avg_v = 0
-                return {"success": (7 < avg_v < 9), "details": "Average: " + str(round(avg_v, 2)) + "V"}
-
-    def animate_fade(self, widget):
-        try:
-            animation = QPropertyAnimation(widget, b"windowOpacity")
-            animation.setDuration(500)
-            animation.setStartValue(0.5)
-            animation.setEndValue(1.0)
-            animation.setEasingCurve(QEasingCurve.InOutQuad)
-            animation.start()
-        except Exception as e:
-            pass  # Animation optional
-
-    def export_logs(self):
-        try:
-            file_path, _ = QFileDialog.getSaveFileName(self, "Save Logs", "", "CSV Files (*.csv)")
-            if file_path:
-                with open(file_path, 'w', newline='') as file:
-                    writer = csv.DictWriter(file, fieldnames=["Test", "Status", "Details"])
-                    writer.writeheader()
-                    writer.writerows(self.test_results)
-                self.status_label.setText("Logs exported successfully.")
-        except Exception as e:
-            QMessageBox.warning(self, "Export Error", "Failed to export: " + str(e))
-
-    def closeEvent(self, event):
-        if self.ser:
-            try:
-                self.ser.close()
-            except:
-                pass
-        event.accept()
+def export_logs_callback(sender, app_data):
+    global test_results
+    try:
+        file_path = app_data['file_path_name']
+        with open(file_path, 'w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=["Test", "Status", "Details"])
+            writer.writeheader()
+            writer.writerows(test_results)
+        dpg.set_value("status_label", "Logs exported successfully to " + file_path)
+    except Exception as e:
+        dpg.set_value("status_label", "Failed to export logs: " + str(e))
 
 if __name__ == "__main__":
     try:
-        app = QApplication(sys.argv)
-        window = EdgehaxTester()
-        window.show()
-        sys.exit(app.exec_())
+        dpg.create_viewport(title="Edgehax Board Tester", width=1000, height=800)
+        dpg.setup_dearpygui()
+        dpg.show_viewport()
+        dpg.set_primary_window("main_window", True)
+        dpg.set_render_callback(detect_board)
+        dpg.configure_item("guidelines_modal", show=True)
+        dpg.start_dearpygui()
     except Exception as e:
-        QMessageBox.critical(None, "Startup Error", "Application failed to start: " + str(e) + "\\nCheck Python installation and dependencies.")
+        print("Application failed to start: " + str(e))
+    finally:
+        if ser:
+            try:
+                ser.close()
+            except:
+                pass
+        dpg.destroy_context()
